@@ -1,31 +1,55 @@
-library("jsonlite")
+#Loading the Packages
+library(jsonlite)
 library(dplyr)
-cook<- fromJSON("train.json")
-View(cook)
-cuisine_freq<- cook %>% group_by(cuisine) %>% summarize(count=n())
 library(ggplot2)
-plot<- ggplot(cuisine_freq, aes(cuisine, count)) + geom_point() + theme_bw()
 library(tm)
+library(SnowballC)
+library(caret)
+
+#Reading the Dataset and Prepossesing
+cook<- fromJSON("train.json", flatten=TRUE)
+cook$ingredients<- lapply(cook$ingredients, FUN=tolower)
+cook$ingredients<- lapply(cook$ingredients, FUN= function(x) gsub("-", "_",x))
+cook$ingredients<- lapply(cook$ingredients, FUN= function(x) gsub(" ", "_",x))
+View(cook)
+
+#Getting the count of cuisines
+cuisine_freq<- cook %>% group_by(cuisine) %>% summarize(count=n())
+plot<- ggplot(cuisine_freq, aes(cuisine, count)) + geom_point() + theme_bw()
+
+#Building a corpus and stemming
 ingredients<- Corpus(VectorSource(cook$ingredients))
-tdm<- TermDocumentMatrix(ingredients)
-sparse<- removeSparseTerms(tdm, 0.99)
-final_ingredients<- as.data.frame(as.matrix(sparse))
-final_ingredients<- t(final_ingredients)
-cuisine<- as.data.frame(cuisine=cook$cuisine)
-final_cook<- cbind(final_ingredients, cuisine)
-write.csv(final_cook, file="cooking.csv")
-#Partitioning the Dataset into training and validation
-library("caret")
-intrain<- createDataPartition(cook$cook.cuisine, p=0.7, list=FALSE)
-training<- cook[intrain,]
-validation<- cook[-intrain,]
-#Building the decision tree model
+ingredients<- tm_map(ingredients, stemDocument)
+
+#Building the document matrix and sparsing
+dtm<- DocumentTermMatrix(ingredients,  control = list(bounds = list(global= c(0.006*length(ingredients), .20*length(ingredients)))))
+final_ingredients<- as.data.frame(as.matrix(dtm))
+final_ingredients$cuisine<- as.factor(cook$cuisine)
+write.csv(final_ingredients, file="cooking.csv")
+
+#Partitioning the Dataset
+cooking<- read.csv("cooking.csv")
+intrain<- createDataPartition(cooking$cuisine, p=0.7, list=FALSE)
+training<- cooking[intrain,]
+validation<- cooking[-intrain,]
+
+#Count the ingredients in processed dataset
+count<-table(training$cuisine)
+count_df<-as.data.frame(count)
+count_df<- arrange(count_df, desc(count))
+
+
+#Decision Tree Model (Accuracy ~36%)
 library(rpart)
 library(rpart.plot)
-model<- rpart(cook.cuisine~.,data=training,method="class")
+model<- rpart(cuisine~.,data=training,method="class")
 prp(model)
 pred_model<- predict(model, newdata=validation, type="class")
-head(pred_model,1)
-CM<- confusionMatrix(pred_model, validation$cook.cuisine)
-CM
 
+#Naive Bayes (Accuracy ~28%)
+library(e1071)
+model<- naiveBayes(cuisine~., data=training)
+pred<- predict(model, newdata= validation, type="class")
+
+#Confusion Matrix
+CM<- confusionMatrix(pred_model, validation$cuisine)
