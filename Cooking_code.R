@@ -1,55 +1,91 @@
-#Loading the Packages
-library(jsonlite)
-library(dplyr)
-library(ggplot2)
-library(tm)
-library(SnowballC)
+#load packages
+library(bitops)
 library(caret)
+library(class)
+library(e1071)
+library(ggplot2)
+library(jsonlite)
+library(SnowballC)
+library(tm)
 
-#Reading the Dataset and Prepossesing
-cook<- fromJSON("train.json", flatten=TRUE)
-cook$ingredients<- lapply(cook$ingredients, FUN=tolower)
+#import data
+cook <- fromJSON("train.json", flatten = TRUE)
+
+#setting seed 
+set.seed(74)
+
+#re-code target feature as a factor
+cook$cuisine <- factor(cook$cuisine)
+
+#Pre-possesing
 cook$ingredients<- lapply(cook$ingredients, FUN= function(x) gsub("-", "_",x))
 cook$ingredients<- lapply(cook$ingredients, FUN= function(x) gsub(" ", "_",x))
-View(cook)
 
-#Getting the count of cuisines
-cuisine_freq<- cook %>% group_by(cuisine) %>% summarize(count=n())
-plot<- ggplot(cuisine_freq, aes(cuisine, count)) + geom_point() + theme_bw()
+#load explanatory text data into a corpus
+cook_corpus <- VCorpus(VectorSource(cook$ingredients))
 
-#Building a corpus and stemming
-ingredients<- Corpus(VectorSource(cook$ingredients))
-ingredients<- tm_map(ingredients, stemDocument)
+#convert corpus to a document term matrix
+#control operations are TOLOWER, REMOVENUMBERS, STOPWORDS, REMOVEPUNCTUATION and STEMMING
+#Pre-Processing
+cook_DTM <- DocumentTermMatrix(cook_corpus, control = list(
+  tolower = TRUE, 
+  removeNumbers = TRUE, 
+  stopwords = TRUE, 
+  removePunctuation = TRUE, 
+  stemming = TRUE))
 
-#Building the document matrix and sparsing
-dtm<- DocumentTermMatrix(ingredients,  control = list(bounds = list(global= c(0.006*length(ingredients), .20*length(ingredients)))))
-final_ingredients<- as.data.frame(as.matrix(dtm))
-final_ingredients$cuisine<- as.factor(cook$cuisine)
-write.csv(final_ingredients, file="cooking.csv")
+#Filtering the words and returning vector of all words repeated at least 20 times
+#Removing the most common words as well i.e which have a count of more than 4000
+cookfreqwords <- findFreqTerms(x = cook_DTM, 20, 4000)
 
-#Partitioning the Dataset
-cooking<- read.csv("cooking.csv")
-intrain<- createDataPartition(cooking$cuisine, p=0.7, list=FALSE)
-training<- cooking[intrain,]
-validation<- cooking[-intrain,]
+#draw random sample (vector of indices)
+q <- sample(39774, size = 39774*.70)
 
-#Count the ingredients in processed dataset
-count<-table(training$cuisine)
-count_df<-as.data.frame(count)
-count_df<- arrange(count_df, desc(count))
+#split dtm into testing and training sections
+cook_train <- cook_DTM[q,]
+cook_test <- cook_DTM[-q,]
+
+#draw correpsonding labels for testing and training data from the raw data
+cook_training_labels <- cook[q,]$cuisine
+cook_test_labels <- cook[-q,]$cuisine 
+
+#applying the frequent words vector to the training and testing sets to refine them
+cookfreqtrain <- cook_train[,cookfreqwords]
+cookfreqtest <- cook_test[,cookfreqwords]
+
+#short function to convert counting the number of word occurences, as it is listed in the DTm,
+#to a binary Yes/No
+convert_counts <- function(x) {x <- ifelse(x >0, "Yes", "No")}
+
+#applying the convert function to the training and testing sets
+cook_train <- apply(cookfreqtrain, FUN = convert_counts, MARGIN = 2)
+cook_test <- apply(cookfreqtest, FUN = convert_counts, MARGIN = 2)
+
+#creating Naive Bayes model
+NBmodel <- naiveBayes(cook_train, cook_training_labels)
+
+#predicting
+preds <- predict(NBmodel, cook_test)
+
+#confusion matrix - 72.5% accuracy
+confusionMatrix(preds, cook_test_labels)
 
 
 #Decision Tree Model (Accuracy ~36%)
 library(rpart)
 library(rpart.plot)
-model<- rpart(cuisine~.,data=training,method="class")
+model<- rpart(cook_train, cook_training_labels, method="class")
 prp(model)
-pred_model<- predict(model, newdata=validation, type="class")
+pred_model<- predict(model, newdata=cook_, type="class")
 
-#Naive Bayes (Accuracy ~28%)
-library(e1071)
-model<- naiveBayes(cuisine~., data=training)
-pred<- predict(model, newdata= validation, type="class")
 
-#Confusion Matrix
-CM<- confusionMatrix(pred_model, validation$cuisine)
+#Linear SVM (~52%)
+x<- apply(cook_train, MARGIN = 2, FUN= function(x) gsub("Yes", 1, x))
+x<- apply(x, MARGIN = 2, FUN= function(x) gsub("No", 0, x))
+View(x)
+y<- apply(cook_test, MARGIN = 2, FUN= function(x) gsub("Yes", 1, x))
+y<- apply(y, MARGIN = 2, FUN= function(x) gsub("No", 0, x))
+View(y)
+n<- svm(x,cook_training_labels, scale= F, type="C-classification", degree=20)
+preds<- predict(n, y, decision.values = T)
+confusionMatrix(preds, cook_test_labels)
